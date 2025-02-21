@@ -5,6 +5,7 @@ from core.models import Widget, WidgetInstance
 from django.core import serializers
 from django.http import JsonResponse, HttpResponseBadRequest, HttpResponseNotFound, HttpResponseForbidden
 
+from util.logging.session_play import SessionPlay
 from util.widget.widget_util import WidgetUtil
 
 logger = logging.getLogger("django")
@@ -58,15 +59,9 @@ class WidgetsApi:
 
         instances = instances[:80]  # TODO: add way to control limit?
 
-        raw_json_instances = json.loads(serializers.serialize("json", instances))
         json_instances = []
-        for raw_json_instance in raw_json_instances:
-            fields = raw_json_instance["fields"]
-            WidgetUtil.convert_booleans(fields)
-            fields["widget"] = WidgetUtil.hack_return(Widget.objects.filter(pk=fields["widget"]))[0]
-            fields["id"] = raw_json_instance["pk"]
-            json_instances.append(fields)
-            # TODO fix serialization
+        for raw_instance in instances:
+            json_instances.append(raw_instance.as_dict(serialize_fks=["widget"]))
 
         return JsonResponse({"instances": json_instances})
 
@@ -74,7 +69,7 @@ class WidgetsApi:
     def question_set_get(request):
         json_data = json.loads(request.body)
         instance_id = json_data.get("instanceId")
-        play_id = json_data.get("playId")
+        play_id = json_data.get("playId")  # Empty if in preview mode
         timestamp = json_data.get("timestamp")
         if not instance_id:
             return HttpResponseBadRequest()
@@ -86,8 +81,10 @@ class WidgetsApi:
         if not instance.playable_by_current_user():
             return HttpResponseForbidden()  # TODO: return message instead, see php
 
-        # TODO check play_id, see php
+        # Validate play ID
+        if play_id and not timestamp and not SessionPlay.validate_by_play_id(play_id):
+            return HttpResponseForbidden()  # TODO was Msg::no_login();
 
         # TODO check preview mode, see php
 
-        return JsonResponse({"qset": instance.qset.as_json()})
+        return JsonResponse({"qset": instance.qset.as_dict()})

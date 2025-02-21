@@ -206,7 +206,7 @@ class DateRange(models.Model):
         ]
 
 
-class Log(models.Model):
+class Log(SerializableModel):
     class LogType(models.TextChoices):
         EMPTY = "", gettext_lazy("Empty")
         BUTTON_PRESS = "BUTTON_PRESS", gettext_lazy("Button Press")
@@ -377,7 +377,7 @@ class LogStorage(models.Model):
         LogPlay,
         related_name="storage_logs",
         on_delete=models.PROTECT,
-        db_column="play_id",
+        db_column="play_d",
     )
     user = models.ForeignKey(
         User,
@@ -613,7 +613,7 @@ class UserExtraAttempts(models.Model):
         ]
 
 
-class Widget(models.Model):
+class Widget(SerializableModel):
     # update these to the relevant paths when those Python files exist
     PATHS_PLAYDATA = os.path.join("_exports", "playdata_exporters.php")
     PATHS_SCOREMOD = os.path.join("_score-modules", "score_module.php")
@@ -670,6 +670,16 @@ class Widget(models.Model):
         self.meta_data = meta_final
         return self.meta_data
 
+    def publishable_by(self, user_id: int) -> bool:
+        if not self.restrict_publish:
+            return True
+        return True  # TODO: return ! Perm_Manager::is_student($user_id);
+
+    def as_dict(self, select_fields: list[str] = None, serialize_fks: list[str] = None) -> dict:
+        result = super().as_dict(select_fields=select_fields, serialize_fks=serialize_fks)
+        result["meta_data"] = self.metadata_clean()
+        return result
+
     @staticmethod
     def make_clean_name(name):
         return name.replace(" ", "-").lower()
@@ -713,7 +723,11 @@ class Widget(models.Model):
         ]
 
 
-class WidgetInstance(models.Model):
+class WidgetInstance(SerializableModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._qset = None
+
     id = models.CharField(primary_key=True, max_length=10, db_collation="utf8_bin")
     widget = models.ForeignKey(
         "Widget",
@@ -734,13 +748,13 @@ class WidgetInstance(models.Model):
     is_draft = models.BooleanField(default=False)
     height = models.IntegerField(default=0)
     width = models.IntegerField(default=0)
-    open_at = models.IntegerField(default=None, null=True)
-    close_at = models.IntegerField(default=None, null=True)
+    open_at = models.DateTimeField(default=None, null=True)
+    close_at = models.DateTimeField(default=None, null=True)
     attempts = models.IntegerField(default=-1)
     is_deleted = models.BooleanField(default=False)
     guest_access = models.BooleanField(default=False)
     is_student_made = models.BooleanField(default=False)
-    updated_at = models.IntegerField(default=None, null=True)
+    updated_at = models.DateTimeField(default=None, null=True)
     embedded_only = models.BooleanField(default=False)
     published_by = models.ForeignKey(
         User,
@@ -755,10 +769,19 @@ class WidgetInstance(models.Model):
     # at least with the existing approach
     @property
     def qset(self):
-        try:
-            return self.qsets.latest("id")
-        except WidgetQset.DoesNotExist:
-            return WidgetQset({"version": None, "data": None})
+        if self._qset is None:
+            try:
+                self._qset = WidgetQset.objects.filter(instance=self).latest("created_at")
+            except WidgetQset.DoesNotExist:
+                self._qset = WidgetQset(version=None, data=None, instance=self)
+        return self._qset
+
+    @qset.setter
+    def qset(self, new_qset):
+        if "data" in new_qset:
+            self.qset.data = new_qset["data"]
+        if "version" in new_qset:
+            self.qset.version = new_qset["version"]
 
 
     def get_qset(self,instance_id,timestamp=None):
@@ -772,7 +795,7 @@ class WidgetInstance(models.Model):
     def playable_by_current_user(self):
         return self.guest_access  # TODO: || ServiceUser::verify_session();
 
-    def db_store(self):
+    def save(self, *args, **kwargs):
         # check for requirements
         # TODO: this requires a user check, revisit later
         # if not self.is_draft and not self.widget.publishable_by(user):
@@ -798,7 +821,8 @@ class WidgetInstance(models.Model):
                     hash = WidgetInstanceHash.generate_key_hash()
                     self.id = hash
                     self.created_at = make_aware(datetime.now())
-                    self.save()
+                    super().save(*args, **kwargs)
+                    self.qset.save()
                     success = True
                 # TODO: use a more specific exception
                 except Exception as e:
@@ -818,7 +842,10 @@ class WidgetInstance(models.Model):
 
             self.published_by = new_publisher
             self.updated_at = make_aware(datetime.now())
-            self.save()
+            super().save(*args, **kwargs)
+            self.qset.save()
+            # ^ If qset is a whole new object, it'll be saved as a new object.
+            #   Otherwise, it'll just save the current qset.
 
             # TODO: originally this was meant to check if the number of rows affected by the 'update' query
             # is greater than zero - may make more sense to try/except this to check for failures?
@@ -865,6 +892,10 @@ class WidgetMetadata(models.Model):
 
 
 class WidgetQset(SerializableModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._data_dict: dict | None = None
+
     id = models.BigAutoField(primary_key=True)
     instance = models.ForeignKey(
         "WidgetInstance",
@@ -873,21 +904,28 @@ class WidgetQset(SerializableModel):
         db_column="inst_id",
     )
     created_at = models.DateTimeField(default=datetime.now)
-    data = models.TextField()
+    _data = models.TextField(db_column="data")
     version = models.CharField(max_length=10, blank=True, null=True)
 
-    def db_store(self):
-        import base64
-        import json
+    @property
+    def data(self):
+        # Return self as a dict
+        if self._data_dict is None:
+            self._data_dict = self._decode_data()
+        return self._data_dict
 
+    @data.setter
+    def data(self, new_data):
+        self._data_dict = new_data
+
+    def save(self, *args, **kwargs):
         try:
             # preserve the qset data, save with no data to reserve an ID while we do transformation and encoding
             # this... may be unnecessary?
-            save_data = self.data
             self.version = self.version if self.version else 0
-            self.data = ""
+            self._data = ""
             self.created_at = make_aware(datetime.now())
-            self.save()
+            super().save(*args, **kwargs)
 
             # at this point we used to convert the qset to an associative array so we could go through it and
             #  identify questions, then save those as separate database entities
@@ -895,11 +933,8 @@ class WidgetQset(SerializableModel):
             # just skip it for now
             # questions = self.find_questions()
 
-            encoded = base64.b64encode(json.dumps(save_data).encode("utf-8")).decode(
-                "utf-8"
-            )
-            self.data = encoded
-            self.save()
+            self._data = self._encode_data()
+            super().save(*args, **kwargs)
 
             # redo this when find_questions is rewritten
             # or just have find_questions do the saving?
@@ -913,10 +948,13 @@ class WidgetQset(SerializableModel):
 
         return False
 
-    def as_json(self, *select_fields):
-        json_qset = super().as_json(*select_fields)
-        decoded_qset_data = base64.b64decode(json_qset["data"][2:-1]).decode("utf-8")  # Slicing removes the b' ... '
-        json_qset["data"] = json.loads(decoded_qset_data)
+    def as_dict(self, *select_fields):
+        json_qset = super().as_dict(*select_fields)
+        if "_data" in json_qset:
+            del json_qset["_data"]
+            json_qset["data"] = self._decode_data()
+        else:
+            json_qset["data"] = {}
         return json_qset
 
     # TODO: implement this, old code below
@@ -1015,6 +1053,22 @@ class WidgetQset(SerializableModel):
     #     }
     #     return $questions;
     # }
+
+    def _decode_data(self) -> dict:
+        result = str(self._data)  # Might be loaded as a bytes object, not str
+        # Remove the b' ... ' that appears when stringifying the bytes object
+        if result.startswith("b'") and result.endswith("'"):
+            result = result[2:-1]
+
+        if result:  # Make sure it's not an empty string or some other falsy object
+            decoded_qset_data = base64.b64decode(result).decode("utf-8")
+            result = json.loads(decoded_qset_data)
+        else:
+            result = {}
+        return result
+
+    def _encode_data(self) -> str:
+        return base64.b64encode(json.dumps(self.data).encode("utf-8")).decode("utf-8")
 
     class Meta:
         db_table = "widget_qset"
