@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 from core.models import Widget, WidgetInstance
 from django.core import serializers
@@ -61,7 +62,8 @@ class WidgetsApi:
 
         json_instances = []
         for raw_instance in instances:
-            json_instances.append(raw_instance.as_dict(serialize_fks=["widget"]))
+            instance_dict = raw_instance.as_dict(serialize_fks=["widget"])
+            json_instances.append(instance_dict)
 
         return JsonResponse({"instances": json_instances})
 

@@ -10,6 +10,7 @@ class Pythond(ScoreModule):
 		item_id = log.item_id if hasattr(log, "item_id") else log["item_id"]
 		 # 🔴 Debugging: Print the item_id being searched
 		print(f"🔍 Looking for question with ID: {item_id}")
+		item_id = int(item_id)
 		if item_id not in self.questions:
 			print(f"❌ ERROR: Item ID '{item_id}' not found in self.questions!")
 			print(f"Available IDs: {list(self.questions.keys())}")
